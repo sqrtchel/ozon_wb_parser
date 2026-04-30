@@ -48,7 +48,7 @@ DB_CONFIG = {
     'port': 5432,
     'database': 'postgres',
     'user': 'postgres',
-    'password': 's56a12y89'
+    'password': '1'
 }
 
 DB_SCHEMA = 'public'
@@ -416,6 +416,35 @@ def find_sells(driver) -> Optional[float]:
     return 0
 
 
+def find_stock(driver) -> int:
+    """Поиск остатков товара"""
+    print("\n📦 Шаг 6: Поиск остатков...")
+    random_delay()
+    
+    stock_selectors = [
+        "span.product-available__quantity",
+        "span.quantity__value",
+        "div.stock span",
+        "[class*='stock'] span",
+        "[class*='quantity']"
+    ]
+    
+    for selector in stock_selectors:
+        try:
+            element = driver.find_element(By.CSS_SELECTOR, selector)
+            text = element.text.strip()
+            numbers = re.findall(r'\d+', text)
+            if numbers:
+                stock = int(numbers[0])
+                print(f"✅ Остаток найден: {stock} шт.")
+                return stock
+        except:
+            continue
+    
+    print("⚠️ Информация об остатках не найдена")
+    return 0
+
+
 # ============================================
 # ПОДКЛЮЧЕНИЕ К БАЗЕ ДАННЫХ
 # ============================================
@@ -449,6 +478,12 @@ def get_links_from_db() -> list[str]:
         rows = cursor.fetchall()
         links = [row[0].strip() for row in rows if row[0] and row[0].strip()]
         logger.info(f"✅ Получено ссылок из БД: {len(links)}")
+        
+        # Выводим первые 5 ссылок для проверки
+        print(f"\n🔗 ПЕРВЫЕ 5 ССЫЛОК ИЗ БД:")
+        for i, link in enumerate(links[:5], 1):
+            print(f"   {i}. {link}")
+        
         return links
     except Exception as e:
         logger.error(f"❌ Ошибка чтения ссылок из public.reference_wildberries: {e}")
@@ -458,39 +493,144 @@ def get_links_from_db() -> list[str]:
         conn.close()
 
 
-# ============================================
-# СОХРАНЕНИЕ ДАННЫХ В ТАБЛИЦУ
-# ============================================
-def save_to_wildberries_table(conn, data: Dict) -> bool:
-    """Сохранение данных в таблицу wildberries"""
+def get_previous_sales(conn, url: str) -> int:
+    """Получает предыдущее значение sales_count для расчета daily_sales"""
     try:
         cursor = conn.cursor()
-
-        current_datetime = datetime.now()
-
-        # Всегда вставляем новую запись (без обновления старых).
-        insert_query = sql.SQL("""
-                               INSERT INTO {}.{} (artikul, name, price, old_price, sells, data)
-                               VALUES (%s, %s, %s, %s, %s, %s)
-                               """).format(sql.Identifier(DB_SCHEMA), sql.Identifier(TABLE_NAME))
-
-        values = (
-            data.get('vendor_code'),
-            data.get('name', ''),
-            data.get('price', 0),
-            data.get('old_price', 0),
-            data.get('sells', 0),
-            current_datetime
-        )
-
-        cursor.execute(insert_query, values)
-        conn.commit()
-        logger.info(f"✅ Новая запись добавлена для артикула {data.get('vendor_code')}")
-        print(f"   📅 Дата добавления: {current_datetime.strftime('%Y-%m-%d %H:%M:%S')}")
-
+        cursor.execute("""
+            SELECT sales_count 
+            FROM public.wildberries 
+            WHERE url = %s 
+            ORDER BY parse_date DESC 
+            LIMIT 1
+        """, (url,))
+        result = cursor.fetchone()
         cursor.close()
-        return True
+        return result[0] if result else 0
+    except:
+        return 0
 
+
+# ============================================
+# СОХРАНЕНИЕ ДАННЫХ В ТАБЛИЦУ (ИСПРАВЛЕННАЯ ВЕРСИЯ)
+# ============================================
+def save_to_wildberries_table(conn, data: Dict) -> bool:
+    """Сохранение данных в таблицу wildberries с обработкой уникальности по artikul"""
+    try:
+        cursor = conn.cursor()
+        current_datetime = datetime.now()
+        
+        # Получаем URL
+        url = data.get('url')
+        
+        if not url:
+            logger.error("❌ URL отсутствует в данных!")
+            return False
+        
+        # Получаем данные из парсинга
+        sales_count = data.get('sells', 0)
+        regular_price = data.get('price', 0)
+        old_price = data.get('old_price', 0)
+        stock = data.get('stock', 0)
+        artikul = data.get('vendor_code', 0)
+        name = data.get('name', '')
+        
+        # Рассчитываем daily_sales и revenue
+        previous_sales = get_previous_sales(conn, url)
+        daily_sales = max(0, sales_count - previous_sales)
+        revenue = sales_count * regular_price
+        
+        # ПРОВЕРЯЕМ: сначала ищем по URL, потом по artikul
+        cursor.execute("SELECT url, artikul FROM public.wildberries WHERE url = %s", (url,))
+        existing_by_url = cursor.fetchone()
+        
+        cursor.execute("SELECT url, artikul FROM public.wildberries WHERE artikul = %s", (artikul,))
+        existing_by_artikul = cursor.fetchone()
+        
+        if existing_by_url:
+            # Обновляем по URL
+            update_query = """
+                UPDATE public.wildberries 
+                SET parse_date = %s,
+                    sales_count = %s,
+                    daily_sales = %s,
+                    revenue = %s,
+                    stock = %s,
+                    updated_at = %s,
+                    regular_price = %s,
+                    old_price = %s,
+                    name = %s,
+                    data = %s
+                WHERE url = %s
+            """
+            values = (
+                current_datetime, sales_count, daily_sales, revenue,
+                stock, current_datetime, regular_price, old_price,
+                name, current_datetime, url
+            )
+            cursor.execute(update_query, values)
+            logger.info(f"✅ Данные ОБНОВЛЕНЫ по URL: {url}")
+            
+        elif existing_by_artikul:
+            # Обновляем по артикулу (если URL другой)
+            old_url = existing_by_artikul[0]
+            update_query = """
+                UPDATE public.wildberries 
+                SET url = %s,
+                    parse_date = %s,
+                    sales_count = %s,
+                    daily_sales = %s,
+                    revenue = %s,
+                    stock = %s,
+                    updated_at = %s,
+                    regular_price = %s,
+                    old_price = %s,
+                    name = %s,
+                    data = %s
+                WHERE artikul = %s
+            """
+            values = (
+                url, current_datetime, sales_count, daily_sales, revenue,
+                stock, current_datetime, regular_price, old_price,
+                name, current_datetime, artikul
+            )
+            cursor.execute(update_query, values)
+            logger.info(f"✅ Данные ОБНОВЛЕНЫ по артикулу {artikul} (был URL: {old_url})")
+            
+        else:
+            # Вставляем новую запись
+            insert_query = """
+                INSERT INTO public.wildberries (
+                    url, artikul, name, parse_date, sales_count, daily_sales, 
+                    revenue, stock, created_at, updated_at, 
+                    regular_price, old_price, data
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """
+            values = (
+                url, artikul, name, current_datetime, sales_count, daily_sales,
+                revenue, stock, current_datetime, current_datetime,
+                regular_price, old_price, current_datetime
+            )
+            cursor.execute(insert_query, values)
+            logger.info(f"✅ Новая запись ДОБАВЛЕНА: {url} (артикул: {artikul})")
+        
+        conn.commit()
+        cursor.close()
+        
+        # Выводим информацию для проверки
+        print(f"\n💾 СОХРАНЕНО В БД:")
+        print(f"   URL: {url}")
+        print(f"   Артикул: {artikul}")
+        print(f"   Наименование: {name[:50] if name else 'Нет'}...")
+        print(f"   Продажи (sales_count): {sales_count}")
+        print(f"   Продажи за день (daily_sales): {daily_sales}")
+        print(f"   Выручка (revenue): {revenue:.2f}")
+        print(f"   Остаток (stock): {stock}")
+        print(f"   Цена (regular_price): {regular_price:.2f}")
+        print(f"   Старая цена (old_price): {old_price:.2f}")
+        
+        return True
+        
     except Exception as e:
         logger.error(f"❌ Ошибка сохранения в БД: {e}")
         if conn:
@@ -508,7 +648,7 @@ def save_to_excel(data: Dict) -> bool:
             wb = Workbook()
             ws = wb.active
             ws.title = "wildberries_data"
-            ws.append(["artikul", "name", "le", "price", "old_price", "sells", "remaining_product", "data"])
+            ws.append(["artikul", "name", "url", "price", "old_price", "sells", "stock", "data"])
 
         row_values = [
             data.get('vendor_code'),
@@ -517,11 +657,11 @@ def save_to_excel(data: Dict) -> bool:
             data.get('price', 0),
             data.get('old_price', 0),
             data.get('sells', 0),
-            data.get('remaining_product', 0),
+            data.get('stock', 0),
             datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         ]
 
-        # Ищем последнюю реально заполненную строку, чтобы игнорировать пустые "хвосты".
+        # Ищем последнюю реально заполненную строку
         last_filled_row = 0
         for row_idx in range(ws.max_row, 0, -1):
             row_has_data = any(
@@ -548,6 +688,10 @@ def save_to_excel(data: Dict) -> bool:
 # ============================================
 def parse_wildberries(driver, url: str) -> Dict:
     """Основная функция парсинга товара с Wildberries"""
+    print("\n" + "=" * 80)
+    print(f"🔍 НАЧАЛО ПАРСИНГА: {url}")
+    print("=" * 80)
+    
     result = {
         'success': False,
         'url': url,
@@ -575,6 +719,7 @@ def parse_wildberries(driver, url: str) -> Dict:
         result['sells'] = find_sells(driver)
         result['name'] = find_product_name(driver)
         result['vendor_code'], method = find_article_number(driver)
+        result['stock'] = find_stock(driver)
 
         result['success'] = True
 
@@ -582,11 +727,13 @@ def parse_wildberries(driver, url: str) -> Dict:
         print("\n" + "=" * 60)
         print("📦 ИТОГОВЫЕ ДАННЫЕ")
         print("=" * 60)
+        print(f"🔗 URL: {result['url']}")
         print(f"📝 Наименование: {result['name']}")
         print(f"🔢 Артикул: {result['vendor_code']} (найден через: {method})")
         print(f"💵 Обычная цена: {result['price']:.2f} ₽")
-        print(f"💸 ЗАЧЕРКНУТАЯ ЦЕНА: {result['old_price']:.2f} ₽")
+        print(f"💸 Зачеркнутая цена: {result['old_price']:.2f} ₽")
         print(f"📊 Продажи: {result['sells']} шт.")
+        print(f"📦 Остаток: {result['stock']} шт.")
 
     except Exception as e:
         logger.error(f"❌ Критическая ошибка: {e}", exc_info=True)
@@ -596,7 +743,7 @@ def parse_wildberries(driver, url: str) -> Dict:
 
 
 # ============================================
-# НОВАЯ ФУНКЦИЯ ДЛЯ ПАРСИНГА НЕСКОЛЬКИХ ССЫЛОК
+# ФУНКЦИЯ ДЛЯ ПАРСИНГА НЕСКОЛЬКИХ ССЫЛОК
 # ============================================
 def parse_multiple_urls(driver, urls_list):
     """Парсинг нескольких ссылок (от 1 до 10)"""
@@ -680,6 +827,7 @@ def main():
                 print(f"   💵 Обычная цена: {result['price']:.2f} ₽")
                 print(f"   💸 Зачеркнутая цена: {result['old_price']:.2f} ₽")
                 print(f"   📊 Продажи: {result['sells']} шт.")
+                print(f"   📦 Остаток: {result['stock']} шт.")
             else:
                 print(f"   ❌ Статус: Ошибка")
                 print(f"   Ошибка: {result.get('error', 'Неизвестная ошибка')}")
