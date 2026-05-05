@@ -1,5 +1,5 @@
 # ============================================
-# ПАРСЕР WILDBERRIES - ПОЛНАЯ ВЕРСИЯ
+# ПАРСЕР WILDBERRIES - ПОЛНАЯ ВЕРСИЯ (ДОЗАПИСЬ В БД С ДИАГНОСТИКОЙ)
 # ============================================
 
 from selenium import webdriver
@@ -420,7 +420,7 @@ def find_stock(driver) -> int:
     """Поиск остатков товара"""
     print("\n📦 Шаг 6: Поиск остатков...")
     random_delay()
-    
+
     stock_selectors = [
         "span.product-available__quantity",
         "span.quantity__value",
@@ -428,7 +428,7 @@ def find_stock(driver) -> int:
         "[class*='stock'] span",
         "[class*='quantity']"
     ]
-    
+
     for selector in stock_selectors:
         try:
             element = driver.find_element(By.CSS_SELECTOR, selector)
@@ -440,7 +440,7 @@ def find_stock(driver) -> int:
                 return stock
         except:
             continue
-    
+
     print("⚠️ Информация об остатках не найдена")
     return 0
 
@@ -478,12 +478,12 @@ def get_links_from_db() -> list[str]:
         rows = cursor.fetchall()
         links = [row[0].strip() for row in rows if row[0] and row[0].strip()]
         logger.info(f"✅ Получено ссылок из БД: {len(links)}")
-        
+
         # Выводим первые 5 ссылок для проверки
         print(f"\n🔗 ПЕРВЫЕ 5 ССЫЛОК ИЗ БД:")
         for i, link in enumerate(links[:5], 1):
             print(f"   {i}. {link}")
-        
+
         return links
     except Exception as e:
         logger.error(f"❌ Ошибка чтения ссылок из public.reference_wildberries: {e}")
@@ -498,12 +498,11 @@ def get_previous_sales(conn, url: str) -> int:
     try:
         cursor = conn.cursor()
         cursor.execute("""
-            SELECT sales_count 
-            FROM public.wildberries 
-            WHERE url = %s 
-            ORDER BY parse_date DESC 
-            LIMIT 1
-        """, (url,))
+                       SELECT sales_count
+                       FROM public.wildberries
+                       WHERE url = %s
+                       ORDER BY parse_date DESC LIMIT 1
+                       """, (url,))
         result = cursor.fetchone()
         cursor.close()
         return result[0] if result else 0
@@ -512,127 +511,112 @@ def get_previous_sales(conn, url: str) -> int:
 
 
 # ============================================
-# СОХРАНЕНИЕ ДАННЫХ В ТАБЛИЦУ (ИСПРАВЛЕННАЯ ВЕРСИЯ)
+# СОХРАНЕНИЕ ДАННЫХ В ТАБЛИЦУ (ДОЗАПИСЬ ВЕРСИЯ - ДИАГНОСТИКА)
 # ============================================
 def save_to_wildberries_table(conn, data: Dict) -> bool:
-    """Сохранение данных в таблицу wildberries с обработкой уникальности по artikul"""
+    """Сохранение данных в таблицу wildberries - КАЖДЫЙ РАЗ НОВАЯ СТРОКА"""
     try:
         cursor = conn.cursor()
         current_datetime = datetime.now()
-        
-        # Получаем URL
+
+        # Получаем данные из парсинга
         url = data.get('url')
-        
         if not url:
             logger.error("❌ URL отсутствует в данных!")
             return False
-        
-        # Получаем данные из парсинга
+
         sales_count = data.get('sells', 0)
         regular_price = data.get('price', 0)
         old_price = data.get('old_price', 0)
         stock = data.get('stock', 0)
         artikul = data.get('vendor_code', 0)
         name = data.get('name', '')
-        
-        # Рассчитываем daily_sales и revenue
+
+        print(f"\n📝 ДАННЫЕ ДЛЯ СОХРАНЕНИЯ:")
+        print(f"   Артикул: {artikul}")
+        print(f"   Наименование: {name[:50]}")
+        print(f"   Продажи: {sales_count}")
+        print(f"   Цена: {regular_price}")
+
+        # Получаем предыдущее значение sales_count для расчета daily_sales
         previous_sales = get_previous_sales(conn, url)
         daily_sales = max(0, sales_count - previous_sales)
+
+        # Рассчитываем revenue (выручка)
         revenue = sales_count * regular_price
-        
-        # ПРОВЕРЯЕМ: сначала ищем по URL, потом по artikul
-        cursor.execute("SELECT url, artikul FROM public.wildberries WHERE url = %s", (url,))
-        existing_by_url = cursor.fetchone()
-        
-        cursor.execute("SELECT url, artikul FROM public.wildberries WHERE artikul = %s", (artikul,))
-        existing_by_artikul = cursor.fetchone()
-        
-        if existing_by_url:
-            # Обновляем по URL
-            update_query = """
-                UPDATE public.wildberries 
-                SET parse_date = %s,
-                    sales_count = %s,
-                    daily_sales = %s,
-                    revenue = %s,
-                    stock = %s,
-                    updated_at = %s,
-                    regular_price = %s,
-                    old_price = %s,
-                    name = %s,
-                    data = %s
-                WHERE url = %s
-            """
-            values = (
-                current_datetime, sales_count, daily_sales, revenue,
-                stock, current_datetime, regular_price, old_price,
-                name, current_datetime, url
-            )
-            cursor.execute(update_query, values)
-            logger.info(f"✅ Данные ОБНОВЛЕНЫ по URL: {url}")
-            
-        elif existing_by_artikul:
-            # Обновляем по артикулу (если URL другой)
-            old_url = existing_by_artikul[0]
-            update_query = """
-                UPDATE public.wildberries 
-                SET url = %s,
-                    parse_date = %s,
-                    sales_count = %s,
-                    daily_sales = %s,
-                    revenue = %s,
-                    stock = %s,
-                    updated_at = %s,
-                    regular_price = %s,
-                    old_price = %s,
-                    name = %s,
-                    data = %s
-                WHERE artikul = %s
-            """
-            values = (
-                url, current_datetime, sales_count, daily_sales, revenue,
-                stock, current_datetime, regular_price, old_price,
-                name, current_datetime, artikul
-            )
-            cursor.execute(update_query, values)
-            logger.info(f"✅ Данные ОБНОВЛЕНЫ по артикулу {artikul} (был URL: {old_url})")
-            
-        else:
-            # Вставляем новую запись
-            insert_query = """
-                INSERT INTO public.wildberries (
-                    url, artikul, name, parse_date, sales_count, daily_sales, 
-                    revenue, stock, created_at, updated_at, 
-                    regular_price, old_price, data
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            """
-            values = (
-                url, artikul, name, current_datetime, sales_count, daily_sales,
-                revenue, stock, current_datetime, current_datetime,
-                regular_price, old_price, current_datetime
-            )
-            cursor.execute(insert_query, values)
-            logger.info(f"✅ Новая запись ДОБАВЛЕНА: {url} (артикул: {artikul})")
-        
+
+        print(f"\n📊 РАССЧИТАННЫЕ ПОКАЗАТЕЛИ:")
+        print(f"   Предыдущие продажи: {previous_sales}")
+        print(f"   Продажи за день: {daily_sales}")
+        print(f"   Выручка: {revenue:.2f}")
+
+        # ✅ ВСЕГДА ВСТАВЛЯЕМ НОВУЮ СТРОКУ, НЕ ОБНОВЛЯЯ СТАРЫЕ
+        insert_query = """
+                       INSERT INTO public.wildberries (url, \
+                                                       artikul, \
+                                                       name, \
+                                                       parse_date, \
+                                                       sales_count, \
+                                                       daily_sales, \
+                                                       revenue, \
+                                                       stock, \
+                                                       created_at, \
+                                                       updated_at, \
+                                                       regular_price, \
+                                                       old_price) \
+                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) \
+                       """
+
+        values = (
+            url,
+            artikul,
+            name,
+            current_datetime,  # parse_date - дата этого парсинга
+            sales_count,  # sales_count - общее количество продаж на текущий момент
+            daily_sales,  # daily_sales - продажи за день (разница)
+            revenue,  # revenue - выручка
+            stock,  # stock - текущий остаток
+            current_datetime,  # created_at
+            current_datetime,  # updated_at
+            regular_price,  # regular_price - текущая цена
+            old_price  # old_price - старая цена (со скидкой)
+        )
+
+        print(f"\n💾 ВЫПОЛНЯЕМ INSERT...")
+        cursor.execute(insert_query, values)
         conn.commit()
-        cursor.close()
-        
+
+        # Проверяем, что запись действительно добавилась
+        cursor.execute("SELECT COUNT(*) FROM public.wildberries WHERE artikul = %s AND parse_date = %s",
+                       (artikul, current_datetime))
+        count = cursor.fetchone()[0]
+
+        if count > 0:
+            logger.info(f"✅ Новая запись ДОБАВЛЕНА: {url} (артикул: {artikul})")
+            print(f"✅ ПОДТВЕРЖДЕНО: Запись добавлена")
+        else:
+            logger.warning(f"⚠️ Запись не найдена после INSERT!")
+            print(f"⚠️ ВНИМАНИЕ: Запись не найдена после вставки!")
+
         # Выводим информацию для проверки
-        print(f"\n💾 СОХРАНЕНО В БД:")
+        print(f"\n💾 СОХРАНЕНО В БД (НОВАЯ СТРОКА):")
+        print(f"   Дата парсинга: {current_datetime.strftime('%Y-%m-%d %H:%M:%S')}")
         print(f"   URL: {url}")
         print(f"   Артикул: {artikul}")
         print(f"   Наименование: {name[:50] if name else 'Нет'}...")
-        print(f"   Продажи (sales_count): {sales_count}")
+        print(f"   Продажи всего (sales_count): {sales_count}")
         print(f"   Продажи за день (daily_sales): {daily_sales}")
         print(f"   Выручка (revenue): {revenue:.2f}")
         print(f"   Остаток (stock): {stock}")
-        print(f"   Цена (regular_price): {regular_price:.2f}")
+        print(f"   Текущая цена (regular_price): {regular_price:.2f}")
         print(f"   Старая цена (old_price): {old_price:.2f}")
-        
+
+        cursor.close()
         return True
-        
+
     except Exception as e:
         logger.error(f"❌ Ошибка сохранения в БД: {e}")
+        print(f"❌ ДЕТАЛИ ОШИБКИ: {str(e)}")
         if conn:
             conn.rollback()
         return False
@@ -648,7 +632,7 @@ def save_to_excel(data: Dict) -> bool:
             wb = Workbook()
             ws = wb.active
             ws.title = "wildberries_data"
-            ws.append(["artikul", "name", "url", "price", "old_price", "sells", "stock", "data"])
+            ws.append(["artikul", "name", "url", "price", "old_price", "sells", "stock", "parse_date"])
 
         row_values = [
             data.get('vendor_code'),
@@ -661,21 +645,7 @@ def save_to_excel(data: Dict) -> bool:
             datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         ]
 
-        # Ищем последнюю реально заполненную строку
-        last_filled_row = 0
-        for row_idx in range(ws.max_row, 0, -1):
-            row_has_data = any(
-                ws.cell(row=row_idx, column=col_idx).value not in (None, "")
-                for col_idx in range(1, len(row_values) + 1)
-            )
-            if row_has_data:
-                last_filled_row = row_idx
-                break
-
-        target_row = last_filled_row + 1
-        for col_idx, value in enumerate(row_values, start=1):
-            ws.cell(row=target_row, column=col_idx, value=value)
-
+        ws.append(row_values)
         wb.save(EXCEL_FILE)
         return True
     except Exception as e:
@@ -691,7 +661,7 @@ def parse_wildberries(driver, url: str) -> Dict:
     print("\n" + "=" * 80)
     print(f"🔍 НАЧАЛО ПАРСИНГА: {url}")
     print("=" * 80)
-    
+
     result = {
         'success': False,
         'url': url,
@@ -839,12 +809,28 @@ def main():
             excel_saved_count = 0
 
             if conn:
+                # Дополнительная проверка количества записей ДО сохранения
+                cursor = conn.cursor()
+                cursor.execute("SELECT COUNT(*) FROM public.wildberries")
+                before_count = cursor.fetchone()[0]
+                print(f"\n📊 Записей в таблице ДО сохранения: {before_count}")
+                cursor.close()
+
                 for result in all_results:
                     if result['success']:
                         if save_to_wildberries_table(conn, result):
                             saved_count += 1
                         if save_to_excel(result):
                             excel_saved_count += 1
+
+                # Проверка количества записей ПОСЛЕ сохранения
+                cursor = conn.cursor()
+                cursor.execute("SELECT COUNT(*) FROM public.wildberries")
+                after_count = cursor.fetchone()[0]
+                print(f"\n📊 Записей в таблице ПОСЛЕ сохранения: {after_count}")
+                print(f"📊 Добавлено новых записей: {after_count - before_count}")
+                cursor.close()
+
                 conn.close()
                 print(f"\n✅ Сохранено в БД {DB_SCHEMA}.{TABLE_NAME}: {saved_count} из {successful} товаров")
                 print(f"✅ Сохранено в Excel {EXCEL_FILE}: {excel_saved_count} из {successful} товаров")
